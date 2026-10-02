@@ -18,6 +18,29 @@
 # and blocks until it exits. Every step is time-bounded so a hang here cannot
 # stall the suspend indefinitely.
 
+# The A1707 helper is owned outside this source tree because it also handles
+# the Alpine Ridge/xHCI lifecycle. Keep it in this single sleep owner.
+resume_compositor_repaint() {
+    runtime=/run/user/1000
+    hyprdir=$runtime/hypr
+    socket=$(find "$hyprdir" -mindepth 2 -maxdepth 2 -type s -name .socket.sock -print -quit 2>/dev/null)
+    if [ -z "$socket" ]; then
+        logger -t barkeep-sleep "resume repaint skipped: no Hyprland IPC socket"
+        return 0
+    fi
+    signature=$(basename "$(dirname "$socket")")
+    if [ -z "$signature" ]; then
+        logger -t barkeep-sleep "resume repaint skipped: no Hyprland IPC signature"
+        return 0
+    fi
+    if timeout 2 runuser -u aeon -- env XDG_RUNTIME_DIR="$runtime" HYPRLAND_INSTANCE_SIGNATURE="$signature" hyprctl reload >/dev/null 2>&1; then
+        logger -t barkeep-sleep "resume compositor repaint requested"
+    else
+        logger -t barkeep-sleep "resume compositor repaint failed (continuing)"
+    fi
+    return 0
+}
+
 case "$1" in
     pre)
         logger -t barkeep-sleep "stopping the display session before $2"
@@ -29,6 +52,8 @@ case "$1" in
         ;;
     post)
         logger -t barkeep-sleep "restoring the display session after $2"
+        timeout 30 /usr/local/sbin/a1707-thunderbolt-sleep post
+        resume_compositor_repaint
         timeout 120 systemctl start barkeep-display.service
         timeout 60  systemctl start barkeep-bar.service
         logger -t barkeep-sleep "display session restored"

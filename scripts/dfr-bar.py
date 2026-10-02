@@ -3,7 +3,7 @@
 
 Draws a function row over a colour gradient and makes the buttons actually
 work: reads the digitizer over hidraw and injects real keys via uinput. Hold Fn
-for F1-F12. The keys fade away when you stop using the machine.
+for F1-F12. The keys and background fade to black when you stop using the machine.
 
 Requires the display session to be up (scripts/dfr-up.sh) so /dev/dfr0 exists.
 
@@ -25,12 +25,22 @@ Colour source:
                       about every 24s. 300 is frantic.
 
 Idle auto-hide:
-    --idle N          hide the keys after N seconds of no keyboard, pointer or
-                      bar activity. 0 disables.                (default 30)
-    --idle-out N      seconds to fade the keys away            (default 2)
-    --idle-in N       seconds to bring them back               (default 1)
+    --idle N          fade the keys and background to black after N seconds of
+                      no keyboard, pointer or bar activity. 0 disables (default 30)
+    --idle-out N      seconds to fade the bar to black          (default 2)
+    --idle-in N       seconds to bring it back                  (default 1)
+
+Theming:
+    --tint N          opacity (0-255) of the theme-background tint on each
+                      button plate. Lower = more wallpaper/theme gradient
+                      shows through; 255 = flat solid plate.  Glyphs and
+                      text always use the theme's foreground colour.
+                      (default 255)
+    --button-wallpaper  keep the bar itself pitch black and clip the wallpaper
+                      gradient into the rounded button plates only
 
 Other:
+    --fps N           animation frame rate              (default 60)
     --no-touch        do not read the digitizer or inject keys
     -h, --help        this text
 
@@ -67,23 +77,22 @@ WALL = os.path.join(_user_home(), ".local/state/omarchy/current/background")
 
 RELEASE_S = 0.12                 # no report for this long => finger up
 
-# Idle behaviour: with no keyboard/mouse/bar activity the keys fade away and
-# leave just the gradient. Any input brings them back.
-IDLE_S     = 30.0                # quiet for this long => hide the keys
-IDLE_OUT_S = 2.0                 # fade them out over this
-IDLE_IN_S  = 1.0                 # and back in over this
+# Idle behaviour: with no keyboard/mouse/bar activity, keys and gradient fade
+# together to black. Any input fades both back in.
+IDLE_S     = 30.0                # quiet for this long => fade the bar to black
+IDLE_OUT_S = 2.0                 # fade out over this
+IDLE_IN_S  = 1.0                 # fade back in over this
 
-# The frame loop runs at 30fps, so a wall-clock gap this large between frames
+# The frame loop runs at 60fps, so a wall-clock gap this large between frames
 # means the process was frozen - i.e. the machine suspended. The panel enable
 # is a HID feature report the firmware can lose over a real suspend, and only
 # userspace sends it, so on waking we re-issue it and fade back in from black.
 RESUME_GAP_S = 5.0
 
-# Frame rate while idle. The gradient keeps drifting when the keys are hidden -
-# it is the only thing left on the bar, so freezing it makes the bar look dead -
-# but it does not need 30fps to do it. The drift advances by elapsed time, so
-# the speed on screen is identical at either rate; there are just fewer frames.
-IDLE_FPS = 30.0
+# Frame rate while idle. The palette can keep tracking while the bar is black;
+# it does not need 60fps to do so. The drift advances by elapsed time, so the
+# speed on screen is identical at either rate; there are just fewer frames.
+IDLE_FPS = 5.0
 
 
 def ease(t):
@@ -105,8 +114,8 @@ KEYS_MEDIA = [
     K("esc",  1,   1.6),    # KEY_ESC
     K("bri-", 224),         # KEY_BRIGHTNESSDOWN
     K("bri+", 225),         # KEY_BRIGHTNESSUP
-    K("grid", 120),         # KEY_SCALE      (mission control)
-    K("apps", 204),         # KEY_DASHBOARD  (launchpad)
+    K("grid", 0, cmd="__mission_control"),   # existing Hyprland SUPER+TAB overview
+    K("apps", 0, cmd="omarchy-menu toggle root"),  # Omarchy app/action menu
     K("kb-",  229),         # KEY_KBDILLUMDOWN
     K("kb+",  230),         # KEY_KBDILLUMUP
     K("prev", 165),         # KEY_PREVIOUSSONG
@@ -123,14 +132,14 @@ KEYS_FN = [K("esc", 1, 1.6)] + [
         [59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 87, 88], start=1)
 ]
 
-# Ctrl+Fn: live system row. Labels come from /sys; a tap opens the matching
-# settings page rather than injecting a key.
+# Ctrl+Fn: live system row. Labels come from UPower and /sys; taps open the
+# corresponding Omarchy panel rather than injecting keycodes.
 KEYS_SYS = [
     K("esc", 1, 1.6),
-    K("kbd",  w=1.6, ind="kbd",  cmd="omarchy-menu toggle"),
-    K("batt", w=1.6, ind="batt", cmd="omarchy-menu toggle"),
-    K("wifi", w=1.6, ind="wifi", cmd="omarchy-menu toggle"),
-    K("bt",   w=1.6, ind="bt",   cmd="omarchy-bluetooth-device"),
+    K("kbd",  w=1.6, ind="kbd",  cmd="omarchy-menu toggle root"),
+    K("batt", w=1.6, ind="batt", cmd="omarchy-shell shell toggle omarchy.power"),
+    K("wifi", w=1.6, ind="wifi", cmd="omarchy-shell shell toggle omarchy.network"),
+    K("bt",   w=1.6, ind="bt",   cmd="omarchy-shell shell toggle omarchy.bluetooth"),
     K("bar-", w=1.0, cmd="__bar_dim"),      # handled internally: bar backlight
     K("bar+", w=1.0, cmd="__bar_bright"),
     K("auto", w=1.0, cmd="__bar_auto"),
@@ -155,7 +164,8 @@ LAYER_NAMES = ["media", "fn", "system", "f13-f24", "transport"]
 KEYS = KEYS_MEDIA          # default; the render/touch paths take a layer arg
 
 # every keycode any layer can emit, so uinput advertises them all
-ALL_CODES = sorted({k["code"] for layer in LAYERS for k in layer if k["code"]})
+ALL_CODES = sorted({k["code"] for layer in LAYERS for k in layer if k["code"]}
+                   | {15, 125})  # KEY_TAB + KEY_LEFTMETA for Mission Control
 
 
 # ---------------------------------------------------------------- palette
@@ -267,10 +277,14 @@ def theme_palette(path=None, n=6):
         if all(math.dist(c, o) > 40 for o in cols):
             cols.append(c)
     if len(cols) < 2:
-        for k in ("background", "foreground"):
+        # Foreground is for glyphs, not the bar gradient. Including it here
+        # makes a dark theme cycle through an unrelated bright white band.
+        for k in ("background", "accent"):
             if vals.get(k):
                 v = vals[k]
-                cols.append(tuple(int(v[i:i + 2], 16) for i in (1, 3, 5)))
+                c = tuple(int(v[i:i + 2], 16) for i in (1, 3, 5))
+                if all(math.dist(c, o) > 40 for o in cols):
+                    cols.append(c)
     cols.sort(key=lambda c: colorsys.rgb_to_hsv(*[v / 255 for v in c])[0])
     return cols[:n]
 
@@ -280,6 +294,46 @@ def theme_stamp(path):
         return (os.path.realpath(path), os.stat(path).st_mtime)
     except OSError:
         return None
+
+
+def load_theme_button_colors(path=None):
+    """Apply Omarchy background/foreground/accent to button plates and glyphs."""
+    import re
+    global FG, BUTTON_BG, BUTTON_ACCENT
+    vals = {}
+    try:
+        with open(path or theme_colors_path()) as f:
+            for line in f:
+                m = re.match(r'\s*([a-z_]+)\s*=\s*"(#[0-9a-fA-F]{6})"', line)
+                if m:
+                    vals[m.group(1)] = m.group(2)
+    except OSError as e:
+        print(f"button theme unavailable ({e}); keeping defaults")
+        return
+
+    def rgb(name, fallback):
+        value = vals.get(name, fallback)
+        return tuple(int(value[i:i + 2], 16) for i in (1, 3, 5))
+
+    FG = rgb("foreground", "#ffffff") + (255,)
+    BUTTON_BG = rgb("background", "#161616")
+    BUTTON_ACCENT = rgb("accent", "#8ab4f8")
+    print("button theme: bg #%02x%02x%02x fg #%02x%02x%02x accent #%02x%02x%02x tint %d/255" %
+          (*BUTTON_BG, *FG[:3], *BUTTON_ACCENT, BUTTON_TINT_ALPHA))
+
+
+def watch_theme_buttons(state, period=2.0):
+    path = theme_colors_path()
+    stamp = theme_stamp(path)
+    while not state["stop"]:
+        time.sleep(period)
+        cur = theme_stamp(path)
+        if cur and cur != stamp:
+            stamp = cur
+            old = (FG, BUTTON_BG, BUTTON_ACCENT)
+            load_theme_button_colors(path)
+            if (FG, BUTTON_BG, BUTTON_ACCENT) != old:
+                state["dirty"] = True
 
 
 def watch_theme(state, period=2.0):
@@ -462,6 +516,14 @@ def key_extents(keys=None):
 
 
 FG = (255, 255, 255, 255)
+BUTTON_BG = (22, 22, 22)
+BUTTON_ACCENT = (138, 180, 248)
+# Opacity of the theme-background tint laid over each button plate. 255 is
+# solid; lower values let the wallpaper/theme gradient show through, which is
+# what makes the theme read as a tint rather than a flat block. Tunable with
+# --tint. The idle fade needs no special case: render() already blends the
+# whole overlay by `buttons`, so a faint plate washes out with everything else.
+BUTTON_TINT_ALPHA = 255
 
 
 def draw_icon(d, kind, cx, cy, font, val=None):
@@ -497,7 +559,8 @@ def draw_icon(d, kind, cx, cy, font, val=None):
             bb = d.textbbox((0, 0), label, font=f)
             d.text((cx + dx - (bb[2] - bb[0]) / 2 - bb[0],
                     cy - (bb[3] - bb[1]) / 2 - bb[1]),
-                   label, font=f, fill=FG)
+                   label, font=f, fill=FG, stroke_width=1,
+                   stroke_fill=(0, 0, 0, 210))
         except Exception:
             pass
 
@@ -641,33 +704,64 @@ def panel_on():
     return ok
 
 
-def render(row, offset, pressed, font, keys=None, buttons=1.0, ind=None):
-    """row: a 1-row RGB image W wide. Rotate it, stretch to full height in C.
+_render_cache = {"sig": None, "img": None}
+_plate_masks = {}
 
-    buttons is the opacity of the whole key overlay, 0..1. Drawing the keys on
-    a copy of the gradient and blending the two is one C-speed composite - far
-    cheaper than trying to scale the alpha of every individual fill and icon,
-    and it fades the plates, outlines and glyphs together as one layer.
+
+def render(row, offset, pressed, font, keys=None, buttons=1.0, ind=None,
+           background=1.0, black=None, button_wallpaper=False):
+    """Render the bar, optionally clipping the wallpaper into button plates.
+
+    In button-wallpaper mode the unoccupied Touch Bar is true black. The
+    wallpaper gradient is pasted only through each rounded button mask; the
+    normal theme tint is then drawn over that clipped wallpaper.
     """
     rowb = row.tobytes()
     o = (int(offset) % W) * 3
     rowb = rowb[o:] + rowb[:o]
-    bg = Image.frombytes("RGB", (W, 1), rowb).resize((W, H), Image.NEAREST)
-    if buttons <= 0.002:                 # fully idle - gradient only
+    wallpaper = Image.frombytes("RGB", (W, 1), rowb).resize((W, H), Image.NEAREST)
+    black = black if black is not None else Image.new("RGB", (W, H))
+    if button_wallpaper:
+        bg = black.copy()
+    else:
+        bg = wallpaper
+        if background < 1.0:
+            bg = Image.blend(black, bg, max(0.0, min(1.0, background)))
+    if buttons <= 0.002:
         return bg
-    img = bg if buttons >= 0.998 else bg.copy()
     keys = keys if keys is not None else KEYS
     ind = ind or {}
-    d = ImageDraw.Draw(img, "RGBA")
-    for i, (x0, x1) in enumerate(key_extents(keys)):
-        d.rounded_rectangle([x0 + 4, 5, x1 - 4, H - 6], radius=10,
-                            fill=(0, 0, 0, 205 if i != pressed else 70),
-                            outline=(255, 255, 255, 60), width=1)
-        k = keys[i]
-        val = ind.get(k["ind"]) if k.get("ind") else None
-        if k.get("ind") == "batt" and isinstance(val, tuple):
-            val = val[0]                       # (percent, status) -> percent
-        draw_icon(d, k["kind"], (x0 + x1) / 2, H / 2, font, val)
+    sig = (rowb, pressed, id(keys), id(font), repr(ind), FG, BUTTON_BG,
+           BUTTON_ACCENT, BUTTON_TINT_ALPHA, button_wallpaper,
+           None if button_wallpaper else background)
+    if _render_cache["sig"] == sig:
+        img = _render_cache["img"]
+    else:
+        img = bg if buttons >= 0.998 else bg.copy()
+        d = ImageDraw.Draw(img, "RGBA")
+        for i, (x0, x1) in enumerate(key_extents(keys)):
+            box = [x0 + 4, 5, x1 - 4, H - 6]
+            if button_wallpaper and i != pressed:
+                mask = _plate_masks.get((x0, x1))
+                if mask is None:
+                    mw, mh = box[2] - box[0] + 1, box[3] - box[1] + 1
+                    mask = Image.new("L", (mw, mh), 0)
+                    ImageDraw.Draw(mask).rounded_rectangle(
+                        [0, 0, mw - 1, mh - 1], radius=10, fill=255)
+                    _plate_masks[(x0, x1)] = mask
+                img.paste(wallpaper.crop((box[0], box[1], box[2] + 1, box[3] + 1)),
+                          (box[0], box[1]), mask)
+            d.rounded_rectangle(box, radius=10,
+                                fill=((*BUTTON_BG, BUTTON_TINT_ALPHA) if i != pressed
+                                      else (*BUTTON_ACCENT, 255)),
+                                outline=(*BUTTON_ACCENT, 190), width=1)
+            k = keys[i]
+            val = ind.get(k["ind"]) if k.get("ind") else None
+            if k.get("ind") == "batt" and isinstance(val, tuple):
+                val = val[0]
+            draw_icon(d, k["kind"], (x0 + x1) / 2, H / 2, font, val)
+        _render_cache["sig"] = sig
+        _render_cache["img"] = img
     return img if buttons >= 0.998 else Image.blend(bg, img, buttons)
 
 
@@ -706,29 +800,35 @@ def find_digitizer():
 
 
 def find_keyboard():
-    """the internal keyboard event node that reports KEY_FN"""
+    """Prefer the MacBook keyboard for Fn; fall back to another KEY_FN device."""
     import evdev
+    fallback = None
     for p in sorted(glob.glob("/dev/input/event*")):
         try:
             d = evdev.InputDevice(p)
+            has_fn = evdev.ecodes.KEY_FN in d.capabilities().get(evdev.ecodes.EV_KEY, [])
         except Exception:
             continue
-        if evdev.ecodes.KEY_FN in d.capabilities().get(evdev.ecodes.EV_KEY, []):
+        if not has_fn:
+            continue
+        if d.name == "Apple SPI Keyboard":
             return p
-    return None
+        if fallback is None:
+            fallback = p
+    return fallback
 
 
 def layer_for(fn, ctrl, alt, meta):
     """Which layer the current modifier combination selects."""
     if not fn:
-        return 0                        # media
+        return 1                        # F1-F12 by default
     if ctrl:
         return 2                        # live system row
     if alt:
         return 3                        # F13-F24
     if meta:
         return 4                        # transport
-    return 1                            # F1-F12
+    return 0                            # media while Fn is held
 
 
 def watch_fn(state, node):
@@ -785,17 +885,44 @@ def _first(pattern, name):
     return None
 
 
-def read_indicators():
-    """Live values for the system layer, straight out of /sys - no daemons.
+def _upower_display_battery():
+    """Read UPower's aggregate percentage, matching Omarchy's own battery UI."""
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["upower", "-i", "/org/freedesktop/UPower/devices/DisplayDevice"],
+            check=True, capture_output=True, text=True, timeout=1.0)
+        fields = {}
+        for line in result.stdout.splitlines():
+            if ":" in line:
+                name, value = line.strip().split(":", 1)
+                fields[name.strip()] = value.strip()
+        percent = fields.get("percentage", "").rstrip("% ")
+        return int(round(float(percent))), fields.get("state", "").lower()
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
 
-    Every field is optional: a machine without a battery or an rfkill node
-    just gets None and the key renders as a plain icon.
-    """
+
+def read_indicators():
+    """Live system values from UPower and /sys; absent devices simply omit keys."""
     out = {}
-    cap = _first("/sys/class/power_supply/BAT*", "capacity")
-    st  = _first("/sys/class/power_supply/BAT*", "status")
-    if cap is not None:
-        out["batt"] = (int(cap), (st or "").lower())
+    battery = _upower_display_battery()
+    if battery is not None:
+        out["batt"] = battery
+    else:
+        # Fallback for systems without UPower: prefer an energy/charge ratio
+        # over the gauge's sometimes-inaccurate rounded `capacity` attribute.
+        cap = _first("/sys/class/power_supply/BAT*", "capacity")
+        st = _first("/sys/class/power_supply/BAT*", "status")
+        for now_name, full_name in (("energy_now", "energy_full"),
+                                    ("charge_now", "charge_full")):
+            now = _first("/sys/class/power_supply/BAT*", now_name)
+            full = _first("/sys/class/power_supply/BAT*", full_name)
+            if now is not None and full is not None and int(full) > 0:
+                cap = str(round(100 * int(now) / int(full)))
+                break
+        if cap is not None:
+            out["batt"] = (int(cap), (st or "").lower())
 
     # wifi: an operstate of "up" on a wireless interface
     for d in sorted(glob.glob("/sys/class/net/*")):
@@ -857,24 +984,39 @@ def run_as_user(cmd):
     except KeyError:
         return
     env = dict(os.environ)
+    omarchy_path = env.get("OMARCHY_PATH") or "/usr/share/omarchy"
+    omarchy_bin = os.path.join(omarchy_path, "bin")
+    path = env.get("PATH") or "/usr/local/bin:/usr/bin:/bin"
+    if omarchy_bin not in path.split(os.pathsep):
+        path = omarchy_bin + os.pathsep + path
     env.update({"HOME": pw.pw_dir, "USER": pw.pw_name, "LOGNAME": pw.pw_name,
-                "XDG_RUNTIME_DIR": f"/run/user/{pw.pw_uid}"})
+                "XDG_RUNTIME_DIR": f"/run/user/{pw.pw_uid}",
+                "OMARCHY_PATH": omarchy_path, "PATH": path})
     env.pop("SUDO_USER", None)
     try:
         subprocess.Popen(
             ["setpriv", "--reuid", str(pw.pw_uid), "--regid", str(pw.pw_gid),
              "--init-groups", "--inh-caps=-all", "/bin/sh", "-c", cmd],
-            env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            env=env, stdout=subprocess.DEVNULL, stderr=sys.stderr,
             start_new_session=True)
     except Exception as e:
         print("command failed:", e)
 
 
-def do_action(state, key):
+def do_action(state, key, ui=None, ecodes=None):
     """A key with `cmd` runs something instead of injecting a keycode."""
     cmd = key.get("cmd")
     if not cmd:
         return False
+    if cmd == "__mission_control":
+        # Reuse the user's existing Hyprland SUPER+TAB -> Hymission binding.
+        ui.write(ecodes.EV_KEY, ecodes.KEY_LEFTMETA, 1)
+        ui.write(ecodes.EV_KEY, ecodes.KEY_TAB, 1)
+        ui.syn()
+        ui.write(ecodes.EV_KEY, ecodes.KEY_TAB, 0)
+        ui.write(ecodes.EV_KEY, ecodes.KEY_LEFTMETA, 0)
+        ui.syn()
+        return True
     if cmd.startswith("__bar_"):                 # bar backlight, handled here
         try:
             import t1hid
@@ -906,7 +1048,7 @@ def input_devices():
     import evdev
     from evdev import ecodes
     out = []
-    for p in sorted(glob.glob("/dev/input/event*")):
+    for p in sorted(glob.glob("/dev/input/event*"), key=lambda x: int(x.split("event")[-1])):
         try:
             d = evdev.InputDevice(p)
         except Exception:
@@ -919,6 +1061,15 @@ def input_devices():
             ecodes.EV_ABS in caps and
             keys & {ecodes.BTN_TOUCH, ecodes.BTN_LEFT, ecodes.BTN_TOOL_FINGER})
         if ecodes.KEY_A in keys or pointer:
+            # EVIOCGRAB probe. An evdev grab is exclusive, so a device grabbed
+            # by another process (unpalm grabs the physical A1707 pad and
+            # republishes it as "Filtered Touchpad") never delivers events to
+            # our fd, even though the fd opens fine. Probe the grab instead of
+            # assuming an open fd means a readable device.
+            try:
+                d.grab(); d.ungrab()
+            except OSError:
+                d.close(); continue                # grabbed elsewhere: dead fd
             out.append(d)
         else:
             d.close()
@@ -1001,7 +1152,7 @@ def touch_loop(state, node):
                         k = keys[zone]
                         # A command key acts once on touch-down; a normal key
                         # injects press now and release when the finger lifts.
-                        if not do_action(state, k) and k["code"]:
+                        if not do_action(state, k, ui, ecodes) and k["code"]:
                             ui.write(ecodes.EV_KEY, k["code"], 1)
                         ui.syn()
                         cur = (state.get("layer", 0), zone)
@@ -1030,6 +1181,8 @@ def main():
         return
     wall, no_touch, flow = WALL, False, 0.0
     source, fade_s = "screen", 2.0
+    fps = 60.0
+    button_wallpaper = False
     if "--wallpaper" in args:
         i = args.index("--wallpaper"); wall = args[i + 1]; source = "wallpaper"; del args[i:i + 2]
     if "--source" in args:
@@ -1038,8 +1191,12 @@ def main():
         i = args.index("--fade"); fade_s = float(args[i + 1]); del args[i:i + 2]
     if "--no-touch" in args:
         no_touch = True; args.remove("--no-touch")
+    if "--button-wallpaper" in args:
+        button_wallpaper = True; args.remove("--button-wallpaper")
     if "--flow" in args:
         i = args.index("--flow"); flow = float(args[i + 1]); del args[i:i + 2]
+    if "--fps" in args:
+        i = args.index("--fps"); fps = max(1.0, float(args[i + 1])); del args[i:i + 2]
     thresh = 18.0
     if "--threshold" in args:
         i = args.index("--threshold"); thresh = float(args[i + 1]); del args[i:i + 2]
@@ -1057,6 +1214,10 @@ def main():
     bar_pct = None
     if "--bar-brightness" in args:
         i = args.index("--bar-brightness"); bar_pct = args[i + 1]; del args[i:i + 2]
+    if "--tint" in args:
+        i = args.index("--tint")
+        globals()["BUTTON_TINT_ALPHA"] = max(0, min(255, int(float(args[i + 1]))))
+        del args[i:i + 2]
     idle_s, idle_out_s, idle_in_s = IDLE_S, IDLE_OUT_S, IDLE_IN_S
     if "--idle" in args:              # 0 disables the auto-hide entirely
         i = args.index("--idle"); idle_s = float(args[i + 1]); del args[i:i + 2]
@@ -1064,6 +1225,9 @@ def main():
         i = args.index("--idle-out"); idle_out_s = float(args[i + 1]); del args[i:i + 2]
     if "--idle-in" in args:
         i = args.index("--idle-in"); idle_in_s = float(args[i + 1]); del args[i:i + 2]
+
+    load_theme_button_colors()
+    print(f"frame rate: {fps:g} fps")
 
     if preview:
         # Offline render: no /dev/dfr0, no root, no panel. Lets the layout and
@@ -1074,7 +1238,8 @@ def main():
             print(f"palette unavailable ({e}); using the builtin")
             cols, why = [(137, 180, 250), (203, 166, 247), (166, 227, 161)], "builtin"
         img = render(strip_row(cols), 0, -1, find_font(26),
-                     LAYERS[preview_layer], 1.0, read_indicators())
+                     LAYERS[preview_layer], 1.0, read_indicators(),
+                     button_wallpaper=button_wallpaper)
         img.save(preview)
         print(f"{preview}: {LAYER_NAMES[preview_layer]} layer, palette from {why}")
         return
@@ -1093,7 +1258,7 @@ def main():
                  "(sudo systemctl stop barkeep-bar, or kill it first)")
     lockf.write(str(os.getpid())); lockf.flush()
 
-    state = {"pressed": -1, "dirty": True, "stop": False, "layer": 0,
+    state = {"pressed": -1, "dirty": True, "stop": False, "layer": 1,
              "row_from": None, "row_to": None, "fade_t0": 0.0, "fade_s": fade_s,
              "last_input": time.time(), "btn_p": 1.0,
              "ind": {}, "bar_pct": 60}
@@ -1126,8 +1291,9 @@ def main():
     elif source == "screen":
         print(f"screen tracking: sampling every {poll}s, fade {fade_s}s, "
               f"threshold {thresh} (in-memory only, nothing written to disk)")
-        threading.Thread(target=watch_screen, args=(state, poll, thresh),
-                         daemon=True).start()
+        threading.Thread(target=watch_screen, args=(state, poll, thresh), daemon=True).start()
+
+    threading.Thread(target=watch_theme_buttons, args=(state,), daemon=True).start()
 
     state["ind"] = read_indicators()
     threading.Thread(target=watch_indicators, args=(state,), daemon=True).start()
@@ -1146,7 +1312,7 @@ def main():
             print("bar backlight failed:", e)
 
     if idle_s > 0:
-        print(f"idle: keys fade out after {idle_s}s quiet "
+        print(f"idle: keys and background fade to black after {idle_s}s quiet "
               f"(out {idle_out_s}s / in {idle_in_s}s)")
         threading.Thread(target=watch_input, args=(state,), daemon=True).start()
 
@@ -1172,10 +1338,17 @@ def main():
     dev.write(to_panel(black)); dev.flush()
     n = panel_on()
     print(f"panel on showing black ({n} report(s)); fading in over {fade_s}s")
+    # Barkeep is deliberately stopped before suspend and started as a fresh
+    # process after wake. A new process cannot observe a frame-time "resume
+    # gap", while the T1 can ignore one early enable report during USB settle.
+    # Retry this harmless HID feature report for a bounded startup window.
+    panel_retry_until = time.time() + 10.0
+    panel_retry_at = 0.0
     lit = True
     intro_t0 = time.time()
-    period = 1.0 / 30
+    period = 1.0 / fps
     last_frame = time.time()
+    last_btn = None
     try:
         while True:
             state["fading"] = False
@@ -1196,6 +1369,7 @@ def main():
             # halfway through the fade-out and the keys come back from half,
             # with no jump - which a fixed start-time curve cannot do.
             btn, btn_fading = 1.0, False
+            btn_changed = False
             if idle_s > 0:
                 want = 1.0 if (now - state["last_input"]) < idle_s else 0.0
                 p = state["btn_p"]
@@ -1204,6 +1378,7 @@ def main():
                 state["btn_p"] = p
                 btn = ease(p)
                 btn_fading = 0.0 < p < 1.0
+                btn_changed = btn != last_btn
             # Fade the WHOLE frame up from black on startup, using the same
             # eased curve as palette changes. The panel is lit while still
             # showing black, so there is no pop - it rises out of black.
@@ -1220,15 +1395,20 @@ def main():
             # true and we rendered and pushed a full 390,600-byte frame every
             # tick forever - which is where this process's CPU went.
             animating = (state["dirty"] or state["fading"] or intro < 1.0
-                         or btn_fading)
+                         or btn_fading or btn_changed or now < panel_retry_until)
             if animating or flow:
                 img = render(row, offset, state["pressed"], font,
                              LAYERS[state.get("layer", 0)], btn,
-                             state.get("ind"))
+                             state.get("ind"), background=btn, black=black,
+                             button_wallpaper=button_wallpaper)
                 if intro < 1.0:
                     img = Image.blend(black, img, intro)
                 dev.write(to_panel(img)); dev.flush()
+                if now < panel_retry_until and now >= panel_retry_at:
+                    threading.Thread(target=panel_on, daemon=True).start()
+                    panel_retry_at = now + 0.5
                 state["dirty"] = False
+                last_btn = btn
             # Advance by ELAPSED TIME, not a fixed step per frame, so --flow is
             # honestly px/sec and the drift runs at the same visible speed
             # whichever rate we are rendering at.
@@ -1237,7 +1417,17 @@ def main():
             # Idle - keys hidden and nothing in transition - is the cheap case:
             # keep drifting, just at fewer frames per second.
             idle_now = btn <= 0.002 and not animating
-            time.sleep((1.0 / IDLE_FPS) if idle_now else period)
+            # Static state is event-driven: avoid waking/rendering at 60 FPS.
+            # Keep the fast cadence only while a fade/press/startup animation
+            # is active; the short static poll still notices idle timeout and
+            # watcher/input dirty flags promptly.
+            if not animating and not flow:
+                time.sleep(0.20)
+            else:
+                target = (1.0 / IDLE_FPS) if idle_now else period
+                slack = target - (time.time() - now)
+                if slack > 0:
+                    time.sleep(slack)
     except KeyboardInterrupt:
         print("\nstopped")
     finally:

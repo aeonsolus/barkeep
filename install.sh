@@ -92,6 +92,7 @@ install_files() {
     install -m755 "$SRC/scripts/dfr-bar.py"   "$LIBDIR/"
     install -m755 "$SRC/scripts/dfr-play.py"  "$LIBDIR/"
     install -m755 "$SRC/scripts/dispon.py"    "$LIBDIR/"
+    install -m755 "$SRC/scripts/dfr-readiness.sh" "$LIBDIR/"
     install -m644 "$SRC/scripts/ibridge-common.sh" "$LIBDIR/"
     install -m644 "$SRC/scripts/t1hid.py"          "$LIBDIR/"
     # systemd ExecCondition: skip the unit cleanly (not "failed") on a machine
@@ -107,9 +108,13 @@ EOS
 #!/usr/bin/env bash
 # Bring up the Touch Bar display session (USB configuration 2).
 . "$LIBDIR/ibridge-common.sh"
+. "$LIBDIR/dfr-readiness.sh"
 D=\$(ibridge_path_or_die) || exit 1
 EOS
     cat >> "$LIBDIR/dfr-up.sh" <<'EOS'
+USB_DEAUTH_TIMEOUT_MS=${USB_DEAUTH_TIMEOUT_MS:-1000}
+DFR_READY_TIMEOUT_MS=${DFR_READY_TIMEOUT_MS:-3000}
+POLL_INTERVAL_MS=${POLL_INTERVAL_MS:-20}
 for m in apple_ib_tb apple_ib_als apple_ibridge; do rmmod $m 2>/dev/null; done
 rmmod barkeep_dfr 2>/dev/null; rmmod barkeep_cfgsel 2>/dev/null
 modprobe barkeep_cfgsel config=1 || exit 1
@@ -118,8 +123,17 @@ modprobe barkeep_cfgsel config=1 || exit 1
 # so a non-black default flashes that colour on every start.
 modprobe barkeep_dfr rect_w=2170 bpp=3 fbmode=1 period=1 colr=0 colg=0 colb=0 || exit 1
 echo 2 > /sys/module/barkeep_cfgsel/parameters/config
-echo 0 > $D/authorized; sleep 2; echo 1 > $D/authorized; sleep 4
-cfg=$(cat $D/bConfigurationValue 2>/dev/null)
+echo 0 > "$D/authorized"
+wait_for_deauthorized "$D" "$USB_DEAUTH_TIMEOUT_MS" "$POLL_INTERVAL_MS" || {
+    echo "failed to observe USB deauthorization within ${USB_DEAUTH_TIMEOUT_MS}ms" >&2
+    exit 1
+}
+echo 1 > "$D/authorized"
+wait_for_display_ready "$D" /dev/dfr0 "$DFR_READY_TIMEOUT_MS" "$POLL_INTERVAL_MS" || {
+    echo "DFR readiness timeout after ${DFR_READY_TIMEOUT_MS}ms (config 2, barkeep-dfr, /dev/dfr0)" >&2
+    exit 1
+}
+cfg=$(cat "$D/bConfigurationValue" 2>/dev/null)
 echo "config=$cfg (want 2)"
 [ "$cfg" = "2" ] || { echo "failed to enter config 2"; exit 1; }
 # The panel is deliberately left OFF here. dfr-bar.py turns it on immediately

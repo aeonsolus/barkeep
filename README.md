@@ -14,9 +14,9 @@ and 30fps video — plus a full function row on top of it:
 - **buttons that work** — touch is read from the digitizer and injected as real keys
 - **five layers**, selected by Fn plus a modifier — media, F1–F12, a live system
   row, F13–F24 and a transport strip
-- **live readouts** — battery, wifi, bluetooth and keyboard backlight, straight from `/sys`
+- **live readouts** — battery from UPower (matching Omarchy's battery UI), wifi, bluetooth and keyboard backlight from `/sys`
 - **Touch Bar backlight control**, including handing it back to the ambient light sensor
-- **keys fade away after 30s idle**, leaving just the gradient, and fade back on any input
+- **keys and background fade to black after 30s idle**, then fade back on keyboard, mouse or bar activity
 - **offline preview** — render any layer to a PNG with no hardware and no root
 - DKMS modules + systemd units, so it comes up on every boot
 
@@ -317,19 +317,17 @@ Reading the keyboard needs no root if you are in the `input` group.
 ### Live indicators and command keys
 
 A key may carry an indicator, whose label is recomputed every 2.5s, or a command, which it
-runs instead of injecting a keycode. Everything comes from `/sys` — no daemon, no polling of
-anything heavier:
+runs instead of injecting a keycode. Battery percentage uses UPower's aggregate display device
+to stay aligned with the Omarchy status bar; radio and keyboard-backlight state come from `/sys`:
 
 | Indicator | Source |
 |---|---|
-| battery | `/sys/class/power_supply/BAT*/{capacity,status}` |
+| battery | UPower `DisplayDevice` percentage; falls back to `energy_now/energy_full`, then `charge_now/charge_full`, then `capacity` |
 | wifi | `operstate` of the interface that has a `wireless/` directory |
 | bluetooth | `/sys/class/rfkill/*` where `type` is `bluetooth` |
 | kbd backlight | `/sys/class/leds/*kbd_backlight*/{brightness,max_brightness}` |
 
-Commands run in the **desktop user's** session via `setpriv`, never as root. Machines without
-a battery or an rfkill node simply render a plain icon. Edit `KEYS_SYS` in `dfr-bar.py` to
-change what the row contains.
+Commands run in the **desktop user's** session via `setpriv`, never as root. The system row opens Omarchy's power, network and Bluetooth panels; media-layer Mission Control sends the existing `Super+Tab` binding, and Apps opens the Omarchy menu. Machines without a battery or an rfkill node simply render a plain icon. Edit `KEYS_SYS` in `dfr-bar.py` to change what the row contains.
 
 ### Touch Bar backlight
 
